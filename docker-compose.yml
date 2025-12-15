@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  screener:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: moex-pair-trading-screener
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+    environment:
+      - PYTHONUNBUFFERED=1
+    networks:
+      - screener-network
+
+networks:
+  screener-network:
+    driver: bridge
+
