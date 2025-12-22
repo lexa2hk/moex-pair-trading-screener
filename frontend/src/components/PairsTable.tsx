@@ -14,12 +14,15 @@ import {
   alpha,
   useTheme,
   LinearProgress,
+  CircularProgress,
 } from '@mui/material';
 import {
   ShowChart as ChartIcon,
   PlayArrow as AnalyzeIcon,
   CheckCircle as CointegatedIcon,
   Cancel as NotCointegatedIcon,
+  Delete as DeleteIcon,
+  HourglassEmpty as PendingIcon,
 } from '@mui/icons-material';
 import type { PairMetrics } from '../api/client';
 
@@ -27,10 +30,14 @@ interface PairsTableProps {
   pairs: PairMetrics[];
   onAnalyze?: (symbol1: string, symbol2: string) => void;
   onViewChart?: (symbol1: string, symbol2: string) => void;
+  onRemove?: (symbol1: string, symbol2: string) => void;
   isLoading?: boolean;
 }
 
-export default function PairsTable({ pairs, onAnalyze, onViewChart, isLoading }: PairsTableProps) {
+// Check if a pair is pending analysis (no metrics yet)
+const isPendingAnalysis = (pair: PairMetrics) => pair.correlation === 0 && !pair.is_cointegrated;
+
+export default function PairsTable({ pairs, onAnalyze, onViewChart, onRemove, isLoading }: PairsTableProps) {
   const theme = useTheme();
 
   const getZScoreColor = (zscore: number, upperThreshold = 2, lowerThreshold = -2) => {
@@ -83,129 +90,192 @@ export default function PairsTable({ pairs, onAnalyze, onViewChart, isLoading }:
               </TableCell>
             </TableRow>
           ) : (
-            pairs.map((pair) => (
-              <TableRow
-                key={`${pair.symbol1}-${pair.symbol2}`}
-                sx={{
-                  '&:hover': {
-                    backgroundColor: alpha(theme.palette.primary.main, 0.05),
-                  },
-                }}
-              >
-                <TableCell>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                      {pair.symbol1}
-                    </Typography>
-                    <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                      /
-                    </Typography>
-                    <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                      {pair.symbol2}
-                    </Typography>
-                  </Box>
-                </TableCell>
-                <TableCell align="center">
-                  <Tooltip title={`p-value: ${pair.cointegration_pvalue.toFixed(4)}`}>
-                    <Box>
-                      {pair.is_cointegrated ? (
-                        <CointegatedIcon sx={{ color: 'success.main', fontSize: 20 }} />
-                      ) : (
-                        <NotCointegatedIcon sx={{ color: 'error.main', fontSize: 20 }} />
+            pairs.map((pair) => {
+              const pending = isPendingAnalysis(pair);
+              return (
+                <TableRow
+                  key={`${pair.symbol1}-${pair.symbol2}`}
+                  sx={{
+                    '&:hover': {
+                      backgroundColor: alpha(theme.palette.primary.main, 0.05),
+                    },
+                    opacity: pending ? 0.7 : 1,
+                  }}
+                >
+                  <TableCell>
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                        {pair.symbol1}
+                      </Typography>
+                      <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                        /
+                      </Typography>
+                      <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                        {pair.symbol2}
+                      </Typography>
+                      {pending && (
+                        <Chip
+                          icon={<CircularProgress size={10} />}
+                          label="Pending"
+                          size="small"
+                          color="warning"
+                          sx={{ ml: 1, fontSize: '0.6rem', height: 20 }}
+                        />
                       )}
                     </Box>
-                  </Tooltip>
-                </TableCell>
-                <TableCell align="right">
-                  <Typography
-                    variant="body2"
-                    sx={{
-                      color: Math.abs(pair.correlation) >= 0.8 ? 'success.main' : 'text.primary',
-                      fontWeight: Math.abs(pair.correlation) >= 0.8 ? 600 : 400,
-                    }}
-                  >
-                    {(pair.correlation * 100).toFixed(1)}%
-                  </Typography>
-                </TableCell>
-                <TableCell align="right">
-                  <Typography
-                    variant="body2"
-                    sx={{
-                      color: getZScoreColor(pair.current_zscore),
-                      fontWeight: 600,
-                      fontFamily: '"JetBrains Mono", monospace',
-                    }}
-                  >
-                    {pair.current_zscore.toFixed(4)}
-                  </Typography>
-                </TableCell>
-                <TableCell align="right">
-                  <Typography variant="body2" sx={{ fontFamily: '"JetBrains Mono", monospace' }}>
-                    {pair.hedge_ratio.toFixed(4)}
-                  </Typography>
-                </TableCell>
-                <TableCell align="right">
-                  <Typography
-                    variant="body2"
-                    sx={{
-                      color: pair.half_life <= 20 ? 'success.main' : pair.half_life <= 40 ? 'warning.main' : 'error.main',
-                    }}
-                  >
-                    {pair.half_life < 999 ? `${pair.half_life.toFixed(1)}d` : '∞'}
-                  </Typography>
-                </TableCell>
-                <TableCell align="right">
-                  <Typography
-                    variant="body2"
-                    sx={{
-                      color: pair.hurst_exponent < 0.5 ? 'success.main' : 'error.main',
-                    }}
-                  >
-                    {pair.hurst_exponent.toFixed(3)}
-                  </Typography>
-                </TableCell>
-                <TableCell align="center">
-                  <Chip
-                    label={getZScoreLabel(pair.current_zscore)}
-                    size="small"
-                    color={
-                      pair.current_zscore >= 2
-                        ? 'error'
-                        : pair.current_zscore <= -2
-                          ? 'success'
-                          : 'default'
-                    }
-                    sx={{
-                      fontSize: '0.65rem',
-                      height: 22,
-                      fontWeight: 600,
-                    }}
-                  />
-                </TableCell>
-                <TableCell align="center">
-                  <Box sx={{ display: 'flex', gap: 0.5, justifyContent: 'center' }}>
-                    <Tooltip title="Analyze">
-                      <IconButton
-                        size="small"
-                        onClick={() => onAnalyze?.(pair.symbol1, pair.symbol2)}
-                        sx={{ color: 'primary.main' }}
+                  </TableCell>
+                  <TableCell align="center">
+                    {pending ? (
+                      <PendingIcon sx={{ color: 'warning.main', fontSize: 20 }} />
+                    ) : (
+                      <Tooltip title={`p-value: ${pair.cointegration_pvalue.toFixed(4)}`}>
+                        <Box>
+                          {pair.is_cointegrated ? (
+                            <CointegatedIcon sx={{ color: 'success.main', fontSize: 20 }} />
+                          ) : (
+                            <NotCointegatedIcon sx={{ color: 'error.main', fontSize: 20 }} />
+                          )}
+                        </Box>
+                      </Tooltip>
+                    )}
+                  </TableCell>
+                  <TableCell align="right">
+                    {pending ? (
+                      <Typography variant="body2" sx={{ color: 'text.disabled' }}>—</Typography>
+                    ) : (
+                      <Typography
+                        variant="body2"
+                        sx={{
+                          color: Math.abs(pair.correlation) >= 0.8 ? 'success.main' : 'text.primary',
+                          fontWeight: Math.abs(pair.correlation) >= 0.8 ? 600 : 400,
+                        }}
                       >
-                        <AnalyzeIcon fontSize="small" />
-                      </IconButton>
-                    </Tooltip>
-                    <Tooltip title="View Chart">
-                      <IconButton
-                        size="small"
-                        onClick={() => onViewChart?.(pair.symbol1, pair.symbol2)}
-                        sx={{ color: 'secondary.main' }}
+                        {(pair.correlation * 100).toFixed(1)}%
+                      </Typography>
+                    )}
+                  </TableCell>
+                  <TableCell align="right">
+                    {pending ? (
+                      <Typography variant="body2" sx={{ color: 'text.disabled' }}>—</Typography>
+                    ) : (
+                      <Typography
+                        variant="body2"
+                        sx={{
+                          color: getZScoreColor(pair.current_zscore),
+                          fontWeight: 600,
+                          fontFamily: '"JetBrains Mono", monospace',
+                        }}
                       >
-                        <ChartIcon fontSize="small" />
-                      </IconButton>
-                    </Tooltip>
-                  </Box>
-                </TableCell>
-              </TableRow>
-            ))
+                        {pair.current_zscore.toFixed(4)}
+                      </Typography>
+                    )}
+                  </TableCell>
+                  <TableCell align="right">
+                    {pending ? (
+                      <Typography variant="body2" sx={{ color: 'text.disabled' }}>—</Typography>
+                    ) : (
+                      <Typography variant="body2" sx={{ fontFamily: '"JetBrains Mono", monospace' }}>
+                        {pair.hedge_ratio.toFixed(4)}
+                      </Typography>
+                    )}
+                  </TableCell>
+                  <TableCell align="right">
+                    {pending ? (
+                      <Typography variant="body2" sx={{ color: 'text.disabled' }}>—</Typography>
+                    ) : (
+                      <Typography
+                        variant="body2"
+                        sx={{
+                          color: pair.half_life <= 20 ? 'success.main' : pair.half_life <= 40 ? 'warning.main' : 'error.main',
+                        }}
+                      >
+                        {pair.half_life < 999 ? `${pair.half_life.toFixed(1)}d` : '∞'}
+                      </Typography>
+                    )}
+                  </TableCell>
+                  <TableCell align="right">
+                    {pending ? (
+                      <Typography variant="body2" sx={{ color: 'text.disabled' }}>—</Typography>
+                    ) : (
+                      <Typography
+                        variant="body2"
+                        sx={{
+                          color: pair.hurst_exponent < 0.5 ? 'success.main' : 'error.main',
+                        }}
+                      >
+                        {pair.hurst_exponent.toFixed(3)}
+                      </Typography>
+                    )}
+                  </TableCell>
+                  <TableCell align="center">
+                    {pending ? (
+                      <Chip
+                        label="PENDING"
+                        size="small"
+                        color="warning"
+                        sx={{
+                          fontSize: '0.65rem',
+                          height: 22,
+                          fontWeight: 600,
+                        }}
+                      />
+                    ) : (
+                      <Chip
+                        label={getZScoreLabel(pair.current_zscore)}
+                        size="small"
+                        color={
+                          pair.current_zscore >= 2
+                            ? 'error'
+                            : pair.current_zscore <= -2
+                              ? 'success'
+                              : 'default'
+                        }
+                        sx={{
+                          fontSize: '0.65rem',
+                          height: 22,
+                          fontWeight: 600,
+                        }}
+                      />
+                    )}
+                  </TableCell>
+                  <TableCell align="center">
+                    <Box sx={{ display: 'flex', gap: 0.5, justifyContent: 'center' }}>
+                      {!pending && (
+                        <>
+                          <Tooltip title="Refresh">
+                            <IconButton
+                              size="small"
+                              onClick={() => onAnalyze?.(pair.symbol1, pair.symbol2)}
+                              sx={{ color: 'primary.main' }}
+                            >
+                              <AnalyzeIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                          <Tooltip title="View Chart">
+                            <IconButton
+                              size="small"
+                              onClick={() => onViewChart?.(pair.symbol1, pair.symbol2)}
+                              sx={{ color: 'secondary.main' }}
+                            >
+                              <ChartIcon fontSize="small" />
+                            </IconButton>
+                          </Tooltip>
+                        </>
+                      )}
+                      <Tooltip title="Remove pair">
+                        <IconButton
+                          size="small"
+                          onClick={() => onRemove?.(pair.symbol1, pair.symbol2)}
+                          sx={{ color: 'error.main' }}
+                        >
+                          <DeleteIcon fontSize="small" />
+                        </IconButton>
+                      </Tooltip>
+                    </Box>
+                  </TableCell>
+                </TableRow>
+              );
+            })
           )}
         </TableBody>
       </Table>

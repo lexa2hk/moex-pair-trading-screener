@@ -1,5 +1,5 @@
 import { Box, Typography, Grid, Paper, Chip, alpha, useTheme } from '@mui/material';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { useNavigate } from 'react-router-dom';
 import { api, type PairMetrics } from '../api/client';
 import PairsTable from '../components/PairsTable';
@@ -18,15 +18,31 @@ export default function Pairs() {
 
   const pairs = pairsData?.data || [];
 
+  const removeMutation = useMutation({
+    mutationFn: ({ s1, s2 }: { s1: string; s2: string }) => api.removePair(s1, s2),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['activePairs'] });
+      queryClient.invalidateQueries({ queryKey: ['dashboardStats'] });
+    },
+  });
+
   const handlePairAnalyzed = (metrics: PairMetrics) => {
     queryClient.invalidateQueries({ queryKey: ['activePairs'] });
   };
 
-  // Calculate stats
+  const handleRemovePair = (s1: string, s2: string) => {
+    if (confirm(`Remove pair ${s1}/${s2}?`)) {
+      removeMutation.mutate({ s1, s2 });
+    }
+  };
+
+  // Calculate stats (excluding pending pairs)
+  const analyzedPairs = pairs.filter((p) => p.correlation !== 0 || p.is_cointegrated);
+  const pendingCount = pairs.length - analyzedPairs.length;
   const cointegratedCount = pairs.filter((p) => p.is_cointegrated).length;
   const tradeableCount = pairs.filter((p) => p.is_tradeable).length;
-  const avgCorrelation = pairs.length > 0
-    ? pairs.reduce((sum, p) => sum + Math.abs(p.correlation), 0) / pairs.length
+  const avgCorrelation = analyzedPairs.length > 0
+    ? analyzedPairs.reduce((sum, p) => sum + Math.abs(p.correlation), 0) / analyzedPairs.length
     : 0;
 
   return (
@@ -59,6 +75,16 @@ export default function Pairs() {
                 Total Pairs
               </Typography>
             </Box>
+            {pendingCount > 0 && (
+              <Box sx={{ textAlign: 'center' }}>
+                <Typography variant="h5" sx={{ fontWeight: 700, color: 'warning.main' }}>
+                  {pendingCount}
+                </Typography>
+                <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                  Pending
+                </Typography>
+              </Box>
+            )}
             <Box sx={{ textAlign: 'center' }}>
               <Typography variant="h5" sx={{ fontWeight: 700, color: 'success.main' }}>
                 {cointegratedCount}
@@ -68,7 +94,7 @@ export default function Pairs() {
               </Typography>
             </Box>
             <Box sx={{ textAlign: 'center' }}>
-              <Typography variant="h5" sx={{ fontWeight: 700, color: 'warning.main' }}>
+              <Typography variant="h5" sx={{ fontWeight: 700, color: 'info.main' }}>
                 {tradeableCount}
               </Typography>
               <Typography variant="caption" sx={{ color: 'text.secondary' }}>
@@ -109,11 +135,12 @@ export default function Pairs() {
         isLoading={isLoading}
         onViewChart={(s1, s2) => navigate(`/charts?symbol1=${s1}&symbol2=${s2}`)}
         onAnalyze={(s1, s2) => {
-          // Re-analyze the pair
-          api.analyzePair(s1, s2).then(() => {
+          // Force re-analyze the pair
+          api.analyzePair(s1, s2, true).then(() => {
             queryClient.invalidateQueries({ queryKey: ['activePairs'] });
           });
         }}
+        onRemove={handleRemovePair}
       />
 
       {/* Legend */}

@@ -141,6 +141,12 @@ class Settings(BaseSettings):
         description="Analysis interval in seconds (15 minutes)",
     )
 
+    # Storage Configuration
+    storage_db_path: str = Field(
+        default="data/screener.db",
+        description="SQLite database path for persistent storage",
+    )
+
     # Screener Configuration
     pairs_to_monitor: str = Field(
         default="",

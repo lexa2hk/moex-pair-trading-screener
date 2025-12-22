@@ -6,6 +6,7 @@ import sys
 from datetime import datetime, time, timedelta
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 import structlog
 
@@ -15,6 +16,7 @@ from src.config import get_settings
 from src.data.collector import MOEXDataCollector
 from src.notifications.telegram import TelegramNotifier
 from src.notifications.bot_handler import TelegramBotHandler
+from src.storage import get_storage, Storage
 from src.utils.logger import setup_logger
 
 logger = structlog.get_logger()
@@ -25,7 +27,6 @@ class PairTradingScreener:
 
     def __init__(
         self,
-        pairs: Optional[list[tuple[str, str]]] = None,
         auto_discover: bool = False,
         top_n_stocks: int = 20,
         enable_bot: bool = True,
@@ -35,13 +36,15 @@ class PairTradingScreener:
         Initialize screener.
 
         Args:
-            pairs: List of pairs to monitor as tuples (SYMBOL1, SYMBOL2)
             auto_discover: If True, auto-discover cointegrated pairs
             top_n_stocks: Number of top liquid stocks for auto-discovery
             enable_bot: Enable interactive Telegram bot
             allowed_users: List of Telegram user IDs allowed to use bot (None = all)
         """
         self.settings = get_settings()
+
+        # Initialize storage
+        self.storage: Storage = get_storage()
 
         # Initialize components
         self.collector = MOEXDataCollector()
@@ -64,37 +67,83 @@ class PairTradingScreener:
             self._setup_bot_callbacks()
 
         # Configuration
-        self.pairs = pairs or []
         self.auto_discover = auto_discover
         self.top_n_stocks = top_n_stocks
 
         # State tracking
-        self.current_positions: dict[str, SignalType] = {}
-        self.signals_today: list[TradingSignal] = []
-        self.active_pairs: list[PairMetrics] = []
         self.last_prices: dict[str, float] = {}
         self.running = False
         self.last_analysis_time: Optional[datetime] = None
         self.last_daily_summary: Optional[datetime] = None
-        self.is_first_run: bool = True  # Track startup for initial zone detection
+        self.is_first_run: bool = True
 
         logger.info(
             "PairTradingScreener initialized",
-            pairs_count=len(self.pairs),
             auto_discover=auto_discover,
             bot_enabled=enable_bot,
+            storage_db=self.settings.storage_db_path,
         )
 
     def _setup_bot_callbacks(self):
         """Setup callbacks for the bot handler."""
         if self.bot_handler:
             self.bot_handler.set_screener_callbacks(
-                get_active_pairs=lambda: self.active_pairs,
-                get_signals_today=lambda: self.signals_today,
-                get_positions=lambda: self.current_positions,
+                get_active_pairs=self._get_active_pairs_metrics,
+                get_signals_today=self._get_signals_today,
+                get_positions=self._get_positions_dict,
                 analyze_pair=self.analyze_pair,
                 get_pair_data=self.fetch_price_data,
             )
+
+    def _get_active_pairs_metrics(self) -> list[PairMetrics]:
+        """Get active pairs with their latest metrics."""
+        metrics_data = self.storage.get_latest_metrics()
+        result = []
+        for m in metrics_data:
+            result.append(PairMetrics(
+                symbol1=m["symbol1"],
+                symbol2=m["symbol2"],
+                correlation=m["correlation"] or 0,
+                is_cointegrated=bool(m["is_cointegrated"]),
+                cointegration_pvalue=m["cointegration_pvalue"] or 1.0,
+                hedge_ratio=m["hedge_ratio"] or 1.0,
+                spread_mean=m["spread_mean"] or 0,
+                spread_std=m["spread_std"] or 1,
+                current_zscore=m["current_zscore"] or 0,
+                half_life=m["half_life"] or float('inf'),
+                hurst_exponent=m["hurst_exponent"] or 0.5,
+                last_updated=datetime.fromisoformat(m["analyzed_at"]) if m["analyzed_at"] else datetime.now(),
+            ))
+        return result
+
+    def _get_signals_today(self) -> list[TradingSignal]:
+        """Get today's signals from storage."""
+        signals_data = self.storage.get_signals(limit=50)
+        result = []
+        for s in signals_data:
+            result.append(TradingSignal(
+                signal_type=SignalType[s["signal_type"]],
+                symbol1=s["symbol1"],
+                symbol2=s["symbol2"],
+                zscore=s["zscore"] or 0,
+                hedge_ratio=s["hedge_ratio"] or 1,
+                strength=s["strength"] if s["strength"] else "MODERATE",
+                confidence=s["confidence"] or 0,
+                entry_price1=s["entry_price1"],
+                entry_price2=s["entry_price2"],
+                target_zscore=s["target_zscore"] or 0,
+                stop_loss_zscore=s["stop_loss_zscore"] or 3,
+                timestamp=datetime.fromisoformat(s["created_at"]) if s["created_at"] else datetime.now(),
+            ))
+        return result
+
+    def _get_positions_dict(self) -> dict[str, SignalType]:
+        """Get current positions as dict for signal generator."""
+        positions = self.storage.get_open_positions()
+        return {
+            f"{p['symbol1']}/{p['symbol2']}": SignalType[p["position_type"]]
+            for p in positions
+        }
 
     def _parse_pairs_from_settings(self) -> list[tuple[str, str]]:
         """Parse pairs from settings."""
@@ -134,33 +183,41 @@ class PairTradingScreener:
             else:
                 logger.warning("Failed to start interactive bot, continuing without it")
 
-        # Load pairs from settings if not provided
-        if not self.pairs:
-            self.pairs = self._parse_pairs_from_settings()
+        # Load pairs from settings if storage is empty
+        active_pairs = self.storage.get_active_pairs()
+        if not active_pairs:
+            pairs_from_settings = self._parse_pairs_from_settings()
+            for s1, s2 in pairs_from_settings:
+                self.storage.add_pair(s1, s2)
+            active_pairs = self.storage.get_active_pairs()
 
         # Auto-discover pairs if enabled and no pairs configured
-        if not self.pairs and self.auto_discover:
+        if not active_pairs and self.auto_discover:
             logger.info("Auto-discovering cointegrated pairs...")
-            self.pairs = await self._discover_pairs()
+            discovered = await self._discover_pairs()
+            for s1, s2 in discovered:
+                self.storage.add_pair(s1, s2)
+            active_pairs = self.storage.get_active_pairs()
 
-        if not self.pairs:
-            logger.error(
-                "No pairs configured. Set PAIRS_TO_MONITOR in .env "
-                "or enable auto-discovery with AUTO_DISCOVER_PAIRS=true"
+        if not active_pairs:
+            logger.warning(
+                "No pairs configured. Add pairs via API, Telegram bot, "
+                "or set PAIRS_TO_MONITOR in .env"
             )
-            return False
 
-        logger.info("Initialized with pairs", pairs=self.pairs)
+        pairs_list = [(p.symbol1, p.symbol2) for p in active_pairs]
+        logger.info("Initialized with pairs", pairs=pairs_list)
 
-        # Run initial analysis to populate active_pairs
+        # Run initial analysis
         logger.info("Running initial analysis...")
         await self.run_analysis_cycle()
 
         # Send startup notification
         await self.notifier.send_info(
             "🚀 Screener Started",
-            f"Monitoring {len(self.pairs)} pairs:\n"
-            + "\n".join(f"• {p[0]}/{p[1]}" for p in self.pairs)
+            f"Monitoring {len(active_pairs)} pairs:\n"
+            + "\n".join(f"• {p.symbol1}/{p.symbol2}" for p in active_pairs[:10])
+            + (f"\n... and {len(active_pairs) - 10} more" if len(active_pairs) > 10 else "")
             + f"\n\n💬 Interactive bot: {'✅ Active' if self.bot_handler and self.bot_handler.is_running() else '❌ Disabled'}",
         )
 
@@ -175,8 +232,6 @@ class PairTradingScreener:
             logger.warning("Failed to fetch instruments")
             return []
 
-        # Get top stocks by volume/liquidity
-        # Assuming instruments has SECID column
         secid_col = None
         for col in instruments.columns:
             if str(col).upper() == "SECID":
@@ -190,24 +245,21 @@ class PairTradingScreener:
         top_stocks = list(instruments[secid_col].head(self.top_n_stocks))
         logger.info(f"Analyzing {len(top_stocks)} stocks for pairs")
 
-        # Fetch price data for all stocks
         price_data = {}
         end_date = datetime.now()
         
-        # Calculate start date based on interval
         interval = self.settings.candle_interval
-        if interval == 1:  # 1-minute candles
+        if interval == 1:
             days_needed = max(1, (self.settings.lookback_period // 390) + 2)
-        elif interval == 10:  # 10-minute candles
+        elif interval == 10:
             days_needed = max(1, (self.settings.lookback_period // 39) + 2)
-        elif interval == 60:  # hourly candles
+        elif interval == 60:
             days_needed = max(1, (self.settings.lookback_period // 7) + 2)
-        else:  # daily or other
+        else:
             days_needed = self.settings.lookback_period + 10
         
         start_date = end_date - timedelta(days=days_needed)
 
-        interval = self.settings.candle_interval
         for symbol in top_stocks:
             ohlcv = self.collector.get_ohlcv(
                 symbol=symbol,
@@ -221,7 +273,6 @@ class PairTradingScreener:
 
         logger.info(f"Loaded price data for {len(price_data)} stocks")
 
-        # Find tradeable pairs
         tradeable = self.analyzer.find_tradeable_pairs(
             price_data,
             min_correlation=0.7,
@@ -229,11 +280,7 @@ class PairTradingScreener:
             max_half_life=30,
         )
 
-        # Return top 10 pairs
-        discovered_pairs = [
-            (m.symbol1, m.symbol2) for m in tradeable[:10]
-        ]
-
+        discovered_pairs = [(m.symbol1, m.symbol2) for m in tradeable[:10]]
         logger.info(f"Discovered {len(discovered_pairs)} tradeable pairs")
         return discovered_pairs
 
@@ -241,17 +288,14 @@ class PairTradingScreener:
         """Fetch recent price data for a symbol."""
         end_date = datetime.now()
         
-        # Calculate start date based on interval
-        # For minute candles, we need fewer days but more candles
         interval = self.settings.candle_interval
-        if interval == 1:  # 1-minute candles
-            # ~390 trading minutes per day, fetch enough days for lookback_period candles
+        if interval == 1:
             days_needed = max(1, (self.settings.lookback_period // 390) + 2)
-        elif interval == 10:  # 10-minute candles
+        elif interval == 10:
             days_needed = max(1, (self.settings.lookback_period // 39) + 2)
-        elif interval == 60:  # hourly candles
+        elif interval == 60:
             days_needed = max(1, (self.settings.lookback_period // 7) + 2)
-        else:  # daily or other
+        else:
             days_needed = self.settings.lookback_period + 10
         
         start_date = end_date - timedelta(days=days_needed)
@@ -261,7 +305,7 @@ class PairTradingScreener:
             start_date=start_date.strftime("%Y-%m-%d"),
             end_date=end_date.strftime("%Y-%m-%d"),
             interval=interval,
-            limit=self.settings.lookback_period + 100,  # Request enough candles
+            limit=self.settings.lookback_period + 100,
             use_cache=use_cache,
         )
 
@@ -270,7 +314,7 @@ class PairTradingScreener:
     async def analyze_pair(
         self, symbol1: str, symbol2: str, use_cache: bool = True
     ) -> Optional[PairMetrics]:
-        """Analyze a single pair."""
+        """Analyze a single pair and save results to storage."""
         # Fetch data for both symbols
         data1 = await self.fetch_price_data(symbol1, use_cache=use_cache)
         data2 = await self.fetch_price_data(symbol2, use_cache=use_cache)
@@ -295,38 +339,74 @@ class PairTradingScreener:
         self.last_prices[symbol1] = float(data1["close"].iloc[-1])
         self.last_prices[symbol2] = float(data2["close"].iloc[-1])
 
+        # Ensure pair exists in storage
+        pair_id = self.storage.get_pair_id(symbol1, symbol2)
+        if pair_id is None:
+            pair_id = self.storage.add_pair(symbol1, symbol2)
+
+        # Extract spread/zscore data for charts
+        spread_data = None
+        zscore_data = None
+        timestamps = None
+        if metrics.spread is not None and metrics.zscore is not None:
+            spread_clean = metrics.spread.dropna()
+            zscore_clean = metrics.zscore.dropna()
+            common_idx = spread_clean.index.intersection(zscore_clean.index)
+            
+            spread_data = [float(v) for v in spread_clean.loc[common_idx].values]
+            zscore_data = [float(v) for v in zscore_clean.loc[common_idx].values]
+            timestamps = [str(ts) for ts in common_idx]
+
+        # Save metrics to storage
+        if pair_id:
+            self.storage.save_metrics(
+                pair_id=pair_id,
+                symbol1=symbol1,
+                symbol2=symbol2,
+                correlation=float(metrics.correlation) if not np.isnan(metrics.correlation) else 0,
+                is_cointegrated=bool(metrics.is_cointegrated),  # Convert numpy bool to Python bool
+                cointegration_pvalue=float(metrics.cointegration_pvalue),
+                hedge_ratio=float(metrics.hedge_ratio) if not np.isnan(metrics.hedge_ratio) else 1.0,
+                spread_mean=float(metrics.spread_mean) if not np.isnan(metrics.spread_mean) else 0,
+                spread_std=float(metrics.spread_std) if not np.isnan(metrics.spread_std) else 1,
+                current_zscore=float(metrics.current_zscore) if not np.isnan(metrics.current_zscore) else 0,
+                half_life=float(metrics.half_life) if not np.isnan(metrics.half_life) and metrics.half_life != float('inf') else 999999,
+                hurst_exponent=float(metrics.hurst_exponent) if not np.isnan(metrics.hurst_exponent) else 0.5,
+                is_tradeable=bool(metrics.is_tradeable()),  # Convert to Python bool
+                spread_data=spread_data,
+                zscore_data=zscore_data,
+                timestamps=timestamps,
+            )
+
         return metrics
 
     async def run_analysis_cycle(self):
         """Run one analysis cycle for all pairs."""
         logger.info("Running analysis cycle...", is_first_run=self.is_first_run)
 
-        self.active_pairs = []
+        active_pairs = self.storage.get_active_pairs()
         new_signals = []
+        current_positions = self._get_positions_dict()
 
-        for symbol1, symbol2 in self.pairs:
+        for pair in active_pairs:
             try:
-                metrics = await self.analyze_pair(symbol1, symbol2)
+                metrics = await self.analyze_pair(pair.symbol1, pair.symbol2)
                 if metrics is None:
                     continue
 
-                self.active_pairs.append(metrics)
-
                 # Generate signal
-                pair_key = f"{symbol1}/{symbol2}"
-                current_pos = self.current_positions.get(pair_key)
+                pair_key = f"{pair.symbol1}/{pair.symbol2}"
+                current_pos = current_positions.get(pair_key)
 
-                # On first run, use relaxed validation to detect pairs already in zones
                 signal = self.signal_generator.generate_signal(
                     metrics,
                     current_position=current_pos,
-                    price1=self.last_prices.get(symbol1),
-                    price2=self.last_prices.get(symbol2),
-                    skip_validation=self.is_first_run,  # Skip strict validation on startup
+                    price1=self.last_prices.get(pair.symbol1),
+                    price2=self.last_prices.get(pair.symbol2),
+                    skip_validation=self.is_first_run,
                 )
 
                 if signal.signal_type != SignalType.NO_SIGNAL:
-                    # Mark signals detected at startup
                     if self.is_first_run and signal.signal_type in (SignalType.LONG_SPREAD, SignalType.SHORT_SPREAD):
                         signal.metadata["startup_detection"] = True
                         logger.info(
@@ -335,38 +415,65 @@ class PairTradingScreener:
                             signal_type=signal.signal_type.value,
                             zscore=round(signal.zscore, 4),
                         )
-                    
-                    new_signals.append(signal)
-                    self.signals_today.append(signal)
 
-                    # Update position tracking
+                    # Save signal to storage - convert numpy types to Python types
+                    self.storage.save_signal(
+                        pair_id=pair.id,
+                        symbol1=signal.symbol1,
+                        symbol2=signal.symbol2,
+                        signal_type=signal.signal_type.value,
+                        zscore=float(signal.zscore),
+                        hedge_ratio=float(signal.hedge_ratio),
+                        strength=signal.strength.value if hasattr(signal.strength, 'value') else str(signal.strength),
+                        confidence=float(signal.confidence),
+                        entry_price1=float(signal.entry_price1) if signal.entry_price1 is not None else None,
+                        entry_price2=float(signal.entry_price2) if signal.entry_price2 is not None else None,
+                        target_zscore=float(signal.target_zscore),
+                        stop_loss_zscore=float(signal.stop_loss_zscore),
+                        metadata={k: (bool(v) if isinstance(v, (np.bool_,)) else float(v) if isinstance(v, (np.floating, np.integer)) else v) 
+                                  for k, v in (signal.metadata or {}).items()},
+                    )
+
+                    new_signals.append(signal)
+
+                    # Update position tracking in storage
                     if signal.signal_type in (SignalType.LONG_SPREAD, SignalType.SHORT_SPREAD):
-                        self.current_positions[pair_key] = signal.signal_type
+                        # Check if position already exists
+                        existing_pos = self.storage.get_position_for_pair(pair.symbol1, pair.symbol2)
+                        if not existing_pos:
+                            self.storage.open_position(
+                                pair_id=pair.id,
+                                symbol1=pair.symbol1,
+                                symbol2=pair.symbol2,
+                                position_type=signal.signal_type.value,
+                                entry_zscore=signal.zscore,
+                                entry_price1=signal.entry_price1,
+                                entry_price2=signal.entry_price2,
+                            )
                     elif signal.signal_type in (
                         SignalType.EXIT_LONG,
                         SignalType.EXIT_SHORT,
                         SignalType.STOP_LOSS,
                     ):
-                        self.current_positions.pop(pair_key, None)
+                        self.storage.close_position(pair.symbol1, pair.symbol2)
 
             except Exception as e:
-                logger.error(f"Error analyzing {symbol1}/{symbol2}: {e}")
+                logger.error(f"Error analyzing {pair.symbol1}/{pair.symbol2}: {e}")
                 continue
 
-        # Send signals
+        # Send signals via Telegram
         if new_signals:
             logger.info(f"Sending {len(new_signals)} signals")
             await self.notifier.send_signals(new_signals)
 
         self.last_analysis_time = datetime.now()
         
-        # Mark first run as complete
         if self.is_first_run:
             self.is_first_run = False
 
         logger.info(
             "Analysis cycle completed",
-            pairs_analyzed=len(self.active_pairs),
+            pairs_analyzed=len(active_pairs),
             signals_generated=len(new_signals),
         )
 
@@ -374,7 +481,6 @@ class PairTradingScreener:
         """Send daily summary if not sent today."""
         now = datetime.now()
 
-        # Parse configured summary time
         summary_time_str = self.settings.daily_summary_time
         try:
             hour, minute = map(int, summary_time_str.split(":"))
@@ -382,33 +488,31 @@ class PairTradingScreener:
         except ValueError:
             summary_time = time(18, 0)
 
-        # Check if we should send summary
         if now.time() >= summary_time:
             if self.last_daily_summary is None or self.last_daily_summary.date() < now.date():
                 logger.info("Sending daily summary...")
+                
+                signals_today = self._get_signals_today()
+                active_pairs_metrics = self._get_active_pairs_metrics()
+                stats = self.storage.get_stats()
+                
                 await self.notifier.send_daily_summary(
-                    self.signals_today,
-                    self.active_pairs,
+                    signals_today,
+                    active_pairs_metrics,
                     stats={
-                        "total_scanned": len(self.pairs),
-                        "cointegrated": sum(1 for p in self.active_pairs if p.is_cointegrated),
+                        "total_scanned": stats["total_pairs"],
+                        "cointegrated": stats["cointegrated_pairs"],
                     },
                 )
                 self.last_daily_summary = now
 
-                # Reset daily signals
-                self.signals_today = []
-
     def is_market_hours(self) -> bool:
         """Check if MOEX is open (Moscow time)."""
         now = datetime.now()
-        # MOEX main session: 10:00 - 18:50 Moscow time
-        # For simplicity, we'll check local time (adjust for your timezone)
         market_open = time(10, 0)
         market_close = time(18, 50)
 
-        # Check if it's a weekday
-        if now.weekday() >= 5:  # Saturday = 5, Sunday = 6
+        if now.weekday() >= 5:
             return False
 
         return market_open <= now.time() <= market_close
@@ -429,19 +533,14 @@ class PairTradingScreener:
 
         while self.running:
             try:
-                # Check market hours
                 if not self.is_market_hours():
                     logger.debug("Market closed, waiting...")
                     await asyncio.sleep(60)
                     continue
 
-                # Run analysis
                 await self.run_analysis_cycle()
-
-                # Check for daily summary
                 await self.send_daily_summary()
 
-                # Wait for next cycle
                 logger.info(f"Waiting {analysis_interval}s until next analysis...")
                 await asyncio.sleep(analysis_interval)
 
@@ -458,7 +557,6 @@ class PairTradingScreener:
         logger.info("Stopping screener...")
         self.running = False
 
-        # Stop the bot
         if self.bot_handler and self.bot_handler.is_running():
             await self.bot_handler.stop()
             logger.info("Bot stopped")
@@ -468,7 +566,6 @@ async def main():
     """Main entry point."""
     settings = get_settings()
 
-    # Setup logging
     setup_logger(
         log_level=settings.log_level,
         log_file=settings.log_file,
@@ -480,7 +577,6 @@ async def main():
         log_level=settings.log_level,
     )
 
-    # Check Telegram configuration
     if not settings.validate_telegram_config():
         logger.error(
             "Telegram not configured! Set TELEGRAM_BOT_TOKEN and "
@@ -488,7 +584,6 @@ async def main():
         )
         sys.exit(1)
 
-    # Parse allowed users if configured
     allowed_users = None
     if hasattr(settings, 'telegram_allowed_users') and settings.telegram_allowed_users:
         try:
@@ -496,7 +591,6 @@ async def main():
         except ValueError:
             logger.warning("Invalid TELEGRAM_ALLOWED_USERS format, allowing all users")
 
-    # Create screener
     screener = PairTradingScreener(
         auto_discover=settings.auto_discover_pairs,
         top_n_stocks=settings.top_stocks_count,
@@ -504,7 +598,6 @@ async def main():
         allowed_users=allowed_users,
     )
 
-    # Handle shutdown signals
     loop = asyncio.get_running_loop()
 
     def handle_shutdown(sig):
@@ -525,4 +618,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

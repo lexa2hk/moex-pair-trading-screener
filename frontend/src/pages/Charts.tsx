@@ -13,9 +13,10 @@ import {
   Chip,
   alpha,
   useTheme,
+  CircularProgress,
 } from '@mui/material';
 import { Refresh as RefreshIcon } from '@mui/icons-material';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query';
 import { useSearchParams } from 'react-router-dom';
 import { api } from '../api/client';
 import ZScoreChart from '../components/ZScoreChart';
@@ -44,11 +45,15 @@ export default function Charts() {
     queryFn: () => api.getActivePairs(),
   });
 
-  const { data: spreadData, isLoading: loadingSpread, refetch: refetchSpread } = useQuery({
+  const { data: spreadData, isLoading: loadingSpread, refetch: refetchSpread, error: spreadError } = useQuery({
     queryKey: ['spreadData', symbol1, symbol2, days],
     queryFn: () => api.getSpreadChartData(symbol1, symbol2, days),
     enabled: !!symbol1 && !!symbol2,
+    retry: 1,
   });
+
+  // Debug logging
+  console.log('Spread data:', spreadData?.data, 'Error:', spreadError);
 
   const { data: price1Data, isLoading: loadingPrice1 } = useQuery({
     queryKey: ['ohlcv', symbol1, days],
@@ -64,19 +69,30 @@ export default function Charts() {
 
   const { data: metricsData } = useQuery({
     queryKey: ['pairMetrics', symbol1, symbol2],
-    queryFn: () => api.analyzePair(symbol1, symbol2, days),
+    queryFn: () => api.analyzePair(symbol1, symbol2, false),
     enabled: !!symbol1 && !!symbol2,
+  });
+
+  // Mutation for force refresh
+  const refreshMutation = useMutation({
+    mutationFn: () => api.analyzePair(symbol1, symbol2, true), // force_refresh=true
+    onSuccess: () => {
+      // Invalidate all queries to get fresh data (must match exact query keys)
+      queryClient.invalidateQueries({ queryKey: ['spreadData', symbol1, symbol2, days] });
+      queryClient.invalidateQueries({ queryKey: ['ohlcv', symbol1, days] });
+      queryClient.invalidateQueries({ queryKey: ['ohlcv', symbol2, days] });
+      queryClient.invalidateQueries({ queryKey: ['pairMetrics', symbol1, symbol2] });
+      queryClient.invalidateQueries({ queryKey: ['activePairs'] });
+      // Force refetch
+      refetchSpread();
+    },
   });
 
   const pairs = pairsData?.data || [];
   const metrics = metricsData?.data;
 
   const handleRefresh = () => {
-    queryClient.invalidateQueries({ queryKey: ['spreadData', symbol1, symbol2] });
-    queryClient.invalidateQueries({ queryKey: ['ohlcv', symbol1] });
-    queryClient.invalidateQueries({ queryKey: ['ohlcv', symbol2] });
-    queryClient.invalidateQueries({ queryKey: ['pairMetrics', symbol1, symbol2] });
-    refetchSpread();
+    refreshMutation.mutate();
   };
 
   // Create unique symbol list from pairs
@@ -98,10 +114,11 @@ export default function Charts() {
         </Box>
         <Button
           variant="outlined"
-          startIcon={<RefreshIcon />}
+          startIcon={refreshMutation.isPending ? <CircularProgress size={18} /> : <RefreshIcon />}
           onClick={handleRefresh}
+          disabled={refreshMutation.isPending}
         >
-          Refresh
+          {refreshMutation.isPending ? 'Refreshing...' : 'Refresh Data'}
         </Button>
       </Box>
 
@@ -214,10 +231,13 @@ export default function Charts() {
               height={300}
             />
           ) : (
-            <Paper sx={{ height: 350, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+            <Paper sx={{ height: 350, display: 'flex', alignItems: 'center', justifyContent: 'center', flexDirection: 'column', gap: 1 }}>
               <Typography variant="body2" sx={{ color: 'text.secondary' }}>
-                No data available
+                {spreadError ? `Error loading chart: ${(spreadError as Error).message}` : 'No Z-Score data available. Click Refresh Data to analyze.'}
               </Typography>
+              <Button size="small" variant="outlined" onClick={handleRefresh} disabled={refreshMutation.isPending}>
+                {refreshMutation.isPending ? 'Refreshing...' : 'Refresh Data'}
+              </Button>
             </Paper>
           )}
         </Grid>

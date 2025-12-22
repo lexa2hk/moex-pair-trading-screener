@@ -132,10 +132,19 @@ export const api = {
   getQuote: (symbol: string) => apiClient.get<Quote>(`/api/quote/${symbol}`),
 
   // Pairs
-  analyzePair: (symbol1: string, symbol2: string, days = 90) =>
-    apiClient.post<PairMetrics>('/api/pairs/analyze', null, {
-      params: { symbol1, symbol2, days },
+  addPair: (symbol1: string, symbol2: string) =>
+    apiClient.post<{ status: string; message: string; pair_id: number }>('/api/pairs/add', {
+      symbol1,
+      symbol2,
     }),
+
+  analyzePair: (symbol1: string, symbol2: string, forceRefresh = false) =>
+    apiClient.post<PairMetrics>('/api/pairs/analyze', null, {
+      params: { symbol1, symbol2, force_refresh: forceRefresh },
+    }),
+
+  removePair: (symbol1: string, symbol2: string) =>
+    apiClient.delete(`/api/pairs/${symbol1}/${symbol2}`),
 
   getActivePairs: () => apiClient.get<PairMetrics[]>('/api/pairs/active'),
 

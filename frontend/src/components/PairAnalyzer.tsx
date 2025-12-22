@@ -44,12 +44,17 @@ export default function PairAnalyzer({ onPairAnalyzed }: PairAnalyzerProps) {
       queryClient.invalidateQueries({ queryKey: ['dashboardStats'] });
       onPairAnalyzed?.(data.data);
       setError(null);
-      setSuccessMessage(`Pair ${data.data.symbol1}/${data.data.symbol2} analyzed successfully!`);
+      // Check if it's a new pair (correlation is 0) or existing
+      if (data.data.correlation === 0) {
+        setSuccessMessage(`Pair ${data.data.symbol1}/${data.data.symbol2} added! Will be analyzed on next screener cycle.`);
+      } else {
+        setSuccessMessage(`Pair ${data.data.symbol1}/${data.data.symbol2} loaded successfully!`);
+      }
     },
     onError: (err: AxiosError<{ detail?: string }>) => {
-      const message = err.response?.data?.detail || err.message || 'Failed to analyze pair';
+      const message = err.response?.data?.detail || err.message || 'Failed to add pair';
       setError(message);
-      console.error('Analyze pair error:', err);
+      console.error('Add pair error:', err);
     },
   });
 
@@ -198,55 +203,73 @@ export default function PairAnalyzer({ onPairAnalyzed }: PairAnalyzerProps) {
             mt: 3,
             p: 2,
             borderRadius: 2,
-            background: alpha(theme.palette.success.main, 0.1),
-            border: `1px solid ${alpha(theme.palette.success.main, 0.3)}`,
+            background: analyzeMutation.data.data.correlation === 0 
+              ? alpha(theme.palette.warning.main, 0.1)
+              : alpha(theme.palette.success.main, 0.1),
+            border: `1px solid ${analyzeMutation.data.data.correlation === 0 
+              ? alpha(theme.palette.warning.main, 0.3)
+              : alpha(theme.palette.success.main, 0.3)}`,
           }}
         >
-          <Typography variant="subtitle2" sx={{ color: 'success.main', mb: 1 }}>
-            ✓ Analysis Complete - {analyzeMutation.data.data.symbol1}/{analyzeMutation.data.data.symbol2}
-          </Typography>
-          <Grid container spacing={2}>
-            <Grid size={{ xs: 6, sm: 3 }}>
-              <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                Correlation
+          {analyzeMutation.data.data.correlation === 0 ? (
+            <>
+              <Typography variant="subtitle2" sx={{ color: 'warning.main', mb: 1 }}>
+                ⏳ Pair Added - {analyzeMutation.data.data.symbol1}/{analyzeMutation.data.data.symbol2}
               </Typography>
-              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {(analyzeMutation.data.data.correlation * 100).toFixed(1)}%
+              <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                This pair will be analyzed by the screener on the next cycle. 
+                Metrics will appear once analysis is complete.
               </Typography>
-            </Grid>
-            <Grid size={{ xs: 6, sm: 3 }}>
-              <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                Cointegrated
+            </>
+          ) : (
+            <>
+              <Typography variant="subtitle2" sx={{ color: 'success.main', mb: 1 }}>
+                ✓ Pair Loaded - {analyzeMutation.data.data.symbol1}/{analyzeMutation.data.data.symbol2}
               </Typography>
-              <Typography
-                variant="body2"
-                sx={{
-                  fontWeight: 600,
-                  color: analyzeMutation.data.data.is_cointegrated ? 'success.main' : 'error.main',
-                }}
-              >
-                {analyzeMutation.data.data.is_cointegrated ? 'Yes' : 'No'}
-              </Typography>
-            </Grid>
-            <Grid size={{ xs: 6, sm: 3 }}>
-              <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                Z-Score
-              </Typography>
-              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {analyzeMutation.data.data.current_zscore.toFixed(4)}
-              </Typography>
-            </Grid>
-            <Grid size={{ xs: 6, sm: 3 }}>
-              <Typography variant="caption" sx={{ color: 'text.secondary' }}>
-                Half-Life
-              </Typography>
-              <Typography variant="body2" sx={{ fontWeight: 600 }}>
-                {analyzeMutation.data.data.half_life < 999
-                  ? `${analyzeMutation.data.data.half_life.toFixed(1)} days`
-                  : '∞'}
-              </Typography>
-            </Grid>
-          </Grid>
+              <Grid container spacing={2}>
+                <Grid size={{ xs: 6, sm: 3 }}>
+                  <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                    Correlation
+                  </Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                    {(analyzeMutation.data.data.correlation * 100).toFixed(1)}%
+                  </Typography>
+                </Grid>
+                <Grid size={{ xs: 6, sm: 3 }}>
+                  <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                    Cointegrated
+                  </Typography>
+                  <Typography
+                    variant="body2"
+                    sx={{
+                      fontWeight: 600,
+                      color: analyzeMutation.data.data.is_cointegrated ? 'success.main' : 'error.main',
+                    }}
+                  >
+                    {analyzeMutation.data.data.is_cointegrated ? 'Yes' : 'No'}
+                  </Typography>
+                </Grid>
+                <Grid size={{ xs: 6, sm: 3 }}>
+                  <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                    Z-Score
+                  </Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                    {analyzeMutation.data.data.current_zscore.toFixed(4)}
+                  </Typography>
+                </Grid>
+                <Grid size={{ xs: 6, sm: 3 }}>
+                  <Typography variant="caption" sx={{ color: 'text.secondary' }}>
+                    Half-Life
+                  </Typography>
+                  <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                    {analyzeMutation.data.data.half_life < 999
+                      ? `${analyzeMutation.data.data.half_life.toFixed(1)} days`
+                      : '∞'}
+                  </Typography>
+                </Grid>
+              </Grid>
+            </>
+          )}
         </Box>
       )}
 
