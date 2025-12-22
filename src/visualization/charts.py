@@ -559,3 +559,4 @@ class PairChartGenerator:
 
         return buf.getvalue()
 
+

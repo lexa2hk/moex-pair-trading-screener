@@ -83,6 +83,12 @@ class Settings(BaseSettings):
         description="T-Bank API secret",
     )
 
+    # Data Configuration
+    candle_interval: int = Field(
+        default=1,
+        description="Candle interval: 1=minute, 10=10min, 60=hourly, 24=daily",
+    )
+
     # Trading Parameters
     entry_threshold: float = Field(
         default=2.0,
@@ -98,7 +104,7 @@ class Settings(BaseSettings):
     )
     lookback_period: int = Field(
         default=60,
-        description="Days for correlation/cointegration analysis",
+        description="Number of candles for correlation/cointegration analysis",
     )
     spread_window: int = Field(
         default=20,

@@ -525,7 +525,11 @@ class TelegramBotHandler:
         elif data.startswith("metrics:"):
             # Show detailed metrics
             _, symbol1, symbol2 = data.split(":")
-            await self._show_pair_metrics(query, symbol1, symbol2)
+            # If original message is a photo, send new message instead of editing
+            if query.message and query.message.photo:
+                await self._send_pair_details_message(query, symbol1, symbol2)
+            else:
+                await self._show_pair_metrics(query, symbol1, symbol2)
 
         elif data.startswith("refresh:"):
             # Refresh pair analysis
@@ -536,17 +540,40 @@ class TelegramBotHandler:
             # Back to pairs list
             if self._get_active_pairs:
                 pairs = self._get_active_pairs()
-                await query.edit_message_text(
-                    "📊 <b>Select a pair for details:</b>",
-                    parse_mode=ParseMode.HTML,
-                    reply_markup=self._get_pairs_keyboard(pairs)
-                )
+                # If original message is a photo, send new message instead of editing
+                if query.message and query.message.photo:
+                    await query.message.reply_text(
+                        "📊 <b>Select a pair for details:</b>",
+                        parse_mode=ParseMode.HTML,
+                        reply_markup=self._get_pairs_keyboard(pairs)
+                    )
+                else:
+                    try:
+                        await query.edit_message_text(
+                            "📊 <b>Select a pair for details:</b>",
+                            parse_mode=ParseMode.HTML,
+                            reply_markup=self._get_pairs_keyboard(pairs)
+                        )
+                    except TelegramError as e:
+                        if "message is not modified" not in str(e).lower():
+                            raise
 
         elif data == "menu:main":
-            await query.edit_message_text(
-                "🏠 Use the keyboard menu below.",
-                parse_mode=ParseMode.HTML
-            )
+            # If original message is a photo, send new message instead of editing
+            if query.message and query.message.photo:
+                await query.message.reply_text(
+                    "🏠 Use the keyboard menu below.",
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                try:
+                    await query.edit_message_text(
+                        "🏠 Use the keyboard menu below.",
+                        parse_mode=ParseMode.HTML
+                    )
+                except TelegramError as e:
+                    if "message is not modified" not in str(e).lower():
+                        raise
 
     async def _show_pair_details(self, query, symbol1: str, symbol2: str):
         """Show details for a specific pair."""
@@ -598,15 +625,76 @@ class TelegramBotHandler:
 
         text += f"\n⏰ Updated: {metrics.last_updated.strftime('%H:%M:%S')}"
 
-        await query.edit_message_text(
-            text,
-            parse_mode=ParseMode.HTML,
-            reply_markup=self._get_pair_actions_keyboard(symbol1, symbol2)
-        )
+        try:
+            await query.edit_message_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._get_pair_actions_keyboard(symbol1, symbol2)
+            )
+        except TelegramError as e:
+            # Ignore "message is not modified" error
+            if "message is not modified" not in str(e).lower():
+                raise
 
     async def _show_pair_metrics(self, query, symbol1: str, symbol2: str):
         """Show detailed metrics for a pair."""
         await self._show_pair_details(query, symbol1, symbol2)
+
+    async def _send_pair_details_message(self, query, symbol1: str, symbol2: str):
+        """Send pair details as a new message (for when we can't edit a photo message)."""
+        if not self._get_active_pairs:
+            return
+
+        pairs = self._get_active_pairs()
+        metrics = None
+
+        for p in pairs:
+            if p.symbol1 == symbol1 and p.symbol2 == symbol2:
+                metrics = p
+                break
+
+        if not metrics:
+            await query.message.reply_text(f"❌ Pair {symbol1}/{symbol2} not found.")
+            return
+
+        settings = get_settings()
+        z = metrics.current_zscore
+        entry = settings.entry_threshold
+
+        if z >= entry:
+            signal_status = "🔴 <b>SHORT ENTRY ZONE</b>"
+        elif z <= -entry:
+            signal_status = "🟢 <b>LONG ENTRY ZONE</b>"
+        elif abs(z) < settings.exit_threshold + 0.5:
+            signal_status = "⬜ <b>EXIT ZONE</b>"
+        else:
+            signal_status = "➖ Neutral"
+
+        text = (
+            f"📊 <b>{symbol1}/{symbol2}</b> (refreshed)\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n\n"
+            f"{signal_status}\n\n"
+            f"📉 <b>Z-Score:</b> {z:.3f}\n"
+            f"📈 <b>Correlation:</b> {metrics.correlation:.4f}\n"
+            f"🔗 <b>Cointegrated:</b> {'✅' if metrics.is_cointegrated else '❌'} "
+            f"(p={metrics.cointegration_pvalue:.4f})\n"
+            f"⚖️ <b>Hedge Ratio:</b> {metrics.hedge_ratio:.4f}\n"
+        )
+
+        if metrics.half_life != float('inf'):
+            text += f"⏱️ <b>Half-life:</b> {metrics.half_life:.1f} days\n"
+
+        if metrics.hurst_exponent:
+            hurst_desc = "mean-reverting" if metrics.hurst_exponent < 0.5 else "trending"
+            text += f"📐 <b>Hurst:</b> {metrics.hurst_exponent:.3f} ({hurst_desc})\n"
+
+        text += f"\n⏰ Updated: {metrics.last_updated.strftime('%H:%M:%S')}"
+
+        await query.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=self._get_pair_actions_keyboard(symbol1, symbol2)
+        )
 
     async def _refresh_pair(self, query, symbol1: str, symbol2: str):
         """Refresh analysis for a pair."""
@@ -617,8 +705,24 @@ class TelegramBotHandler:
         await query.answer("Refreshing...")
 
         try:
-            await self._analyze_pair_callback(symbol1, symbol2)
-            await self._show_pair_details(query, symbol1, symbol2)
+            # Force refresh without cache
+            await self._analyze_pair_callback(symbol1, symbol2, use_cache=False)
+            
+            # Check if original message is a photo - if so, send new message instead of editing
+            if query.message and query.message.photo:
+                await self._send_pair_details_message(query, symbol1, symbol2)
+            else:
+                try:
+                    await self._show_pair_details(query, symbol1, symbol2)
+                except TelegramError as te:
+                    # Ignore "message is not modified" error
+                    if "message is not modified" not in str(te).lower():
+                        raise
+        except TelegramError as te:
+            # Ignore "message is not modified" error
+            if "message is not modified" not in str(te).lower():
+                logger.error("Failed to refresh pair", error=str(te))
+                await query.answer(f"Error: {te}", show_alert=True)
         except Exception as e:
             logger.error("Failed to refresh pair", error=str(e))
             await query.answer(f"Error: {e}", show_alert=True)

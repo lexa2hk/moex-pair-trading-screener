@@ -193,14 +193,28 @@ class PairTradingScreener:
         # Fetch price data for all stocks
         price_data = {}
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=self.settings.lookback_period + 10)
+        
+        # Calculate start date based on interval
+        interval = self.settings.candle_interval
+        if interval == 1:  # 1-minute candles
+            days_needed = max(1, (self.settings.lookback_period // 390) + 2)
+        elif interval == 10:  # 10-minute candles
+            days_needed = max(1, (self.settings.lookback_period // 39) + 2)
+        elif interval == 60:  # hourly candles
+            days_needed = max(1, (self.settings.lookback_period // 7) + 2)
+        else:  # daily or other
+            days_needed = self.settings.lookback_period + 10
+        
+        start_date = end_date - timedelta(days=days_needed)
 
+        interval = self.settings.candle_interval
         for symbol in top_stocks:
             ohlcv = self.collector.get_ohlcv(
                 symbol=symbol,
                 start_date=start_date.strftime("%Y-%m-%d"),
                 end_date=end_date.strftime("%Y-%m-%d"),
-                interval=24,
+                interval=interval,
+                limit=self.settings.lookback_period + 100,
             )
             if ohlcv is not None and len(ohlcv) >= self.settings.lookback_period:
                 price_data[symbol] = ohlcv["close"]
@@ -223,27 +237,43 @@ class PairTradingScreener:
         logger.info(f"Discovered {len(discovered_pairs)} tradeable pairs")
         return discovered_pairs
 
-    async def fetch_price_data(self, symbol: str) -> Optional[pd.DataFrame]:
+    async def fetch_price_data(self, symbol: str, use_cache: bool = True) -> Optional[pd.DataFrame]:
         """Fetch recent price data for a symbol."""
         end_date = datetime.now()
-        start_date = end_date - timedelta(days=self.settings.lookback_period + 10)
+        
+        # Calculate start date based on interval
+        # For minute candles, we need fewer days but more candles
+        interval = self.settings.candle_interval
+        if interval == 1:  # 1-minute candles
+            # ~390 trading minutes per day, fetch enough days for lookback_period candles
+            days_needed = max(1, (self.settings.lookback_period // 390) + 2)
+        elif interval == 10:  # 10-minute candles
+            days_needed = max(1, (self.settings.lookback_period // 39) + 2)
+        elif interval == 60:  # hourly candles
+            days_needed = max(1, (self.settings.lookback_period // 7) + 2)
+        else:  # daily or other
+            days_needed = self.settings.lookback_period + 10
+        
+        start_date = end_date - timedelta(days=days_needed)
 
         ohlcv = self.collector.get_ohlcv(
             symbol=symbol,
             start_date=start_date.strftime("%Y-%m-%d"),
             end_date=end_date.strftime("%Y-%m-%d"),
-            interval=24,
+            interval=interval,
+            limit=self.settings.lookback_period + 100,  # Request enough candles
+            use_cache=use_cache,
         )
 
         return ohlcv
 
     async def analyze_pair(
-        self, symbol1: str, symbol2: str
+        self, symbol1: str, symbol2: str, use_cache: bool = True
     ) -> Optional[PairMetrics]:
         """Analyze a single pair."""
         # Fetch data for both symbols
-        data1 = await self.fetch_price_data(symbol1)
-        data2 = await self.fetch_price_data(symbol2)
+        data1 = await self.fetch_price_data(symbol1, use_cache=use_cache)
+        data2 = await self.fetch_price_data(symbol2, use_cache=use_cache)
 
         if data1 is None or data2 is None:
             logger.warning(f"Failed to fetch data for {symbol1}/{symbol2}")
