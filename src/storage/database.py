@@ -3,11 +3,12 @@
 import json
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import pandas as pd
 import structlog
 
 from src.config import get_settings
@@ -202,6 +203,30 @@ class Storage:
                 CREATE INDEX IF NOT EXISTS idx_signals_pair ON signals(pair_id);
                 CREATE INDEX IF NOT EXISTS idx_signals_created ON signals(created_at);
                 CREATE INDEX IF NOT EXISTS idx_positions_open ON positions(is_open);
+            """)
+
+        # Create price data table for storing OHLCV data
+        with self._get_conn() as conn:
+            conn.executescript("""
+                -- Price data for all monitored symbols
+                CREATE TABLE IF NOT EXISTS price_data (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    symbol TEXT NOT NULL,
+                    timestamp TEXT NOT NULL,
+                    open REAL,
+                    high REAL,
+                    low REAL,
+                    close REAL,
+                    volume REAL,
+                    value REAL,
+                    interval INTEGER DEFAULT 1,
+                    fetched_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(symbol, timestamp, interval)
+                );
+
+                -- Create indexes for price data
+                CREATE INDEX IF NOT EXISTS idx_price_symbol ON price_data(symbol, interval);
+                CREATE INDEX IF NOT EXISTS idx_price_timestamp ON price_data(timestamp);
             """)
 
     # ==================== PAIRS ====================
@@ -596,6 +621,150 @@ class Storage:
                 "active_signals": recent_signals,
                 "avg_correlation": avg_corr,
             }
+
+    # ==================== PRICE DATA ====================
+
+    def save_price_data(self, symbol: str, df: pd.DataFrame, interval: int = 1) -> int:
+        """
+        Save OHLCV price data to database.
+
+        Args:
+            symbol: Security ticker
+            df: DataFrame with OHLCV data (index is timestamp)
+            interval: Candle interval in minutes
+
+        Returns:
+            Number of rows inserted
+        """
+        if df is None or df.empty:
+            return 0
+
+        rows_inserted = 0
+        with self._get_conn() as conn:
+            for idx, row in df.iterrows():
+                try:
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO price_data 
+                        (symbol, timestamp, open, high, low, close, volume, value, interval)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            symbol.upper(),
+                            str(idx),
+                            row.get("open"),
+                            row.get("high"),
+                            row.get("low"),
+                            row.get("close"),
+                            row.get("volume"),
+                            row.get("value"),
+                            interval,
+                        )
+                    )
+                    rows_inserted += 1
+                except Exception as e:
+                    logger.debug(
+                        "Failed to insert price data row",
+                        symbol=symbol,
+                        timestamp=idx,
+                        error=str(e),
+                    )
+                    continue
+
+        logger.info(
+            "Price data saved",
+            symbol=symbol,
+            rows=rows_inserted,
+            interval=interval,
+        )
+        return rows_inserted
+
+    def get_price_data(
+        self,
+        symbol: str,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None,
+        interval: int = 1,
+        limit: int = 1000,
+    ) -> Optional[pd.DataFrame]:
+        """
+        Get OHLCV price data from database.
+
+        Args:
+            symbol: Security ticker
+            start_date: Start date in ISO format
+            end_date: End date in ISO format
+            interval: Candle interval in minutes
+            limit: Maximum number of rows
+
+        Returns:
+            DataFrame with OHLCV data or None if failed
+        """
+        with self._get_conn() as conn:
+            query = "SELECT * FROM price_data WHERE symbol = ? AND interval = ?"
+            params = [symbol.upper(), interval]
+
+            if start_date:
+                query += " AND timestamp >= ?"
+                params.append(start_date)
+            if end_date:
+                query += " AND timestamp <= ?"
+                params.append(end_date)
+
+            query += " ORDER BY timestamp DESC LIMIT ?"
+            params.append(limit)
+
+            cursor = conn.execute(query, params)
+            rows = cursor.fetchall()
+
+            if not rows:
+                return None
+
+            # Convert to DataFrame
+            df = pd.DataFrame([dict(row) for row in rows])
+
+            # Convert timestamp to datetime and set as index
+            df["timestamp"] = pd.to_datetime(df["timestamp"], errors="coerce")
+            df.set_index("timestamp", inplace=True)
+            df.sort_index(inplace=True)
+
+            # Drop internal columns
+            df.drop(columns=["id", "fetched_at"], inplace=True, errors="ignore")
+
+            return df
+
+    def get_latest_price(self, symbol: str, interval: int = 1) -> Optional[dict]:
+        """
+        Get latest price for a symbol.
+
+        Args:
+            symbol: Security ticker
+            interval: Candle interval in minutes
+
+        Returns:
+            Dict with latest price data or None
+        """
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                """
+                SELECT * FROM price_data 
+                WHERE symbol = ? AND interval = ?
+                ORDER BY timestamp DESC LIMIT 1
+                """,
+                (symbol.upper(), interval),
+            )
+            row = cursor.fetchone()
+            if row:
+                return dict(row)
+            return None
+
+    def get_monitored_symbols(self) -> list[str]:
+        """Get all unique symbols from price_data table."""
+        with self._get_conn() as conn:
+            cursor = conn.execute(
+                "SELECT DISTINCT symbol FROM price_data ORDER BY symbol"
+            )
+            return [row["symbol"] for row in cursor.fetchall()]
 
 
 def get_storage() -> Storage:

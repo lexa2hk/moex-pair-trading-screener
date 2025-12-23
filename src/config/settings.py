@@ -42,7 +42,7 @@ class Settings(BaseSettings):
         description="Directory for MOEX data cache",
     )
     moex_cache_ttl_minutes: int = Field(
-        default=5,
+        default=1,
         description="Cache TTL in minutes for MOEX data",
         ge=0,
     )
@@ -133,12 +133,12 @@ class Settings(BaseSettings):
 
     # Scheduler
     data_update_interval: int = Field(
-        default=300,
-        description="Data update interval in seconds (5 minutes)",
+        default=60,
+        description="Data update interval in seconds (1 minute)",
     )
     analysis_interval: int = Field(
-        default=900,
-        description="Analysis interval in seconds (15 minutes)",
+        default=60,
+        description="Analysis interval in seconds (1 minute)",
     )
 
     # Storage Configuration
@@ -193,4 +193,3 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Get cached settings instance."""
     return Settings()
-

@@ -188,14 +188,15 @@ async def get_ohlcv(
     interval: int = Query(default=24, description="Candle interval: 1, 10, 60, 24"),
     days: int = Query(default=90, le=365),
 ):
-    """Get OHLCV data for a symbol."""
-    if not collector:
-        raise HTTPException(status_code=503, detail="Collector not initialized")
+    """Get OHLCV data for a symbol - from database if available, otherwise from MOEX."""
+    if not collector or not storage:
+        raise HTTPException(status_code=503, detail="Collector or storage not initialized")
     
     end_date = datetime.now()
     start_date = end_date - timedelta(days=days)
     
-    ohlcv = collector.get_ohlcv(
+    # Try to get from database first
+    db_data = storage.get_price_data(
         symbol=symbol,
         start_date=start_date.strftime("%Y-%m-%d"),
         end_date=end_date.strftime("%Y-%m-%d"),
@@ -203,8 +204,35 @@ async def get_ohlcv(
         limit=500,
     )
     
+    if db_data is not None and len(db_data) > 0:
+        logger.debug("Returning OHLCV data from database", symbol=symbol, rows=len(db_data))
+        result = []
+        for idx, row in db_data.iterrows():
+            result.append(OHLCVDataPoint(
+                timestamp=str(idx),
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+                volume=float(row["volume"]) if "volume" in row and pd.notna(row.get("volume")) else None,
+            ))
+        return result
+    
+    # Fallback to MOEX API
+    ohlcv = collector.get_ohlcv(
+        symbol=symbol,
+        start_date=start_date.strftime("%Y-%m-%d"),
+        end_date=end_date.strftime("%Y-%m-%d"),
+        interval=interval,
+        limit=500,
+        use_cache=False,
+    )
+    
     if ohlcv is None or len(ohlcv) == 0:
         raise HTTPException(status_code=404, detail=f"No data found for {symbol}")
+    
+    # Save to database
+    storage.save_price_data(symbol, ohlcv, interval=interval)
     
     result = []
     for idx, row in ohlcv.iterrows():

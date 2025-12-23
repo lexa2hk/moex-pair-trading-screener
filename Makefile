@@ -1,4 +1,4 @@
-.PHONY: install dev test lint format clean run-screener run-api run-frontend run-all docker-build docker-run
+.PHONY: install dev test lint format clean run-screener run-api run-frontend run-all run-worker docker-build docker-run
 
 # Python
 install:
@@ -20,6 +20,9 @@ format:
 # Run individual services
 run-screener:
 	uv run python -m src.screener
+
+run-worker:
+	uv run python -m src.worker.data_collector
 
 run-api:
 	uv run uvicorn src.api.server:app --reload --host 0.0.0.0 --port 8000

@@ -100,6 +100,30 @@ class PairTradingScreener:
         metrics_data = self.storage.get_latest_metrics()
         result = []
         for m in metrics_data:
+            # Reconstruct spread and zscore as pandas Series for chart generation
+            spread_series = None
+            zscore_series = None
+            
+            if m.get("spread_data") and m.get("zscore_data") and m.get("timestamps"):
+                try:
+                    spread_values = m["spread_data"]
+                    zscore_values = m["zscore_data"]
+                    timestamps = m["timestamps"]
+                    
+                    # Create datetime index from timestamps
+                    index = pd.to_datetime(timestamps)
+                    
+                    # Create pandas Series
+                    spread_series = pd.Series(spread_values, index=index)
+                    zscore_series = pd.Series(zscore_values, index=index)
+                except Exception as e:
+                    logger.warning(
+                        "Failed to reconstruct spread/zscore series",
+                        symbol1=m["symbol1"],
+                        symbol2=m["symbol2"],
+                        error=str(e)
+                    )
+            
             result.append(PairMetrics(
                 symbol1=m["symbol1"],
                 symbol2=m["symbol2"],
@@ -113,6 +137,8 @@ class PairTradingScreener:
                 half_life=m["half_life"] or float('inf'),
                 hurst_exponent=m["hurst_exponent"] or 0.5,
                 last_updated=datetime.fromisoformat(m["analyzed_at"]) if m["analyzed_at"] else datetime.now(),
+                spread=spread_series,
+                zscore=zscore_series,
             ))
         return result
 
@@ -284,8 +310,8 @@ class PairTradingScreener:
         logger.info(f"Discovered {len(discovered_pairs)} tradeable pairs")
         return discovered_pairs
 
-    async def fetch_price_data(self, symbol: str, use_cache: bool = True) -> Optional[pd.DataFrame]:
-        """Fetch recent price data for a symbol."""
+    async def fetch_price_data(self, symbol: str, use_cache: bool = False) -> Optional[pd.DataFrame]:
+        """Fetch recent price data for a symbol and save to database."""
         end_date = datetime.now()
         
         interval = self.settings.candle_interval
@@ -309,10 +335,14 @@ class PairTradingScreener:
             use_cache=use_cache,
         )
 
+        # Save to database
+        if ohlcv is not None and not ohlcv.empty:
+            self.storage.save_price_data(symbol, ohlcv, interval=interval)
+
         return ohlcv
 
     async def analyze_pair(
-        self, symbol1: str, symbol2: str, use_cache: bool = True
+        self, symbol1: str, symbol2: str, use_cache: bool = False
     ) -> Optional[PairMetrics]:
         """Analyze a single pair and save results to storage."""
         # Fetch data for both symbols
